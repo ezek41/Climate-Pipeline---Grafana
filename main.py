@@ -14,28 +14,14 @@ CITIES = {
     "Buenos Aires": {"lat": -34.6037, "lon": -58.3816}
 }
 
-def fetch_weather_and_forecast(lat, lon):
+def fetch_weather(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "current": [
-            "temperature_2m",
-            "relative_humidity_2m",
-            "surface_pressure",
-            "wind_speed_10m",
-            "precipitation"
-        ],
-        "hourly": [
-            "temperature_2m",
-            "relative_humidity_2m",
-            "surface_pressure",
-            "wind_speed_10m",
-            "precipitation"
-        ],
-        "daily": ["sunrise", "sunset"],
+        "hourly": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m", "surface_pressure", "precipitation"],
         "forecast_days": 7,
-        "timezone": "auto"
+        "timezone": "UTC"
     }
     response = requests.get(url, params=params, timeout=10)
     response.raise_for_status()
@@ -46,34 +32,9 @@ def run_pipeline():
     
     for city_name, coords in CITIES.items():
         try:
-            raw_data = fetch_weather_and_forecast(coords["lat"], coords["lon"])
+            data = fetch_weather(coords["lat"], coords["lon"])
+            hourly = data.get("hourly", {})
             
-            # 1. Registro actual
-            current = raw_data.get("current", {})
-            daily = raw_data.get("daily", {})
-            
-            time_str = current.get("time")
-            dt = datetime.fromisoformat(time_str).replace(tzinfo=timezone.utc)
-            
-            sunrise_str = daily.get("sunrise", [None])[0]
-            sunset_str = daily.get("sunset", [None])[0]
-            sunrise_dt = datetime.fromisoformat(sunrise_str).replace(tzinfo=timezone.utc) if sunrise_str else None
-            sunset_dt = datetime.fromisoformat(sunset_str).replace(tzinfo=timezone.utc) if sunset_str else None
-            
-            rows_to_insert.append((
-                dt,
-                city_name,
-                current.get("temperature_2m"),
-                current.get("relative_humidity_2m"),
-                current.get("wind_speed_10m"),
-                current.get("surface_pressure"),
-                current.get("precipitation", 0.0),
-                sunrise_dt,
-                sunset_dt
-            ))
-            
-            # 2. Registros de pronóstico futuro (cada 3 horas para no saturar)
-            hourly = raw_data.get("hourly", {})
             times = hourly.get("time", [])
             temps = hourly.get("temperature_2m", [])
             hums = hourly.get("relative_humidity_2m", [])
@@ -81,23 +42,18 @@ def run_pipeline():
             press = hourly.get("surface_pressure", [])
             precips = hourly.get("precipitation", [])
             
-            now_utc = datetime.now(timezone.utc)
-            
-            for i in range(0, len(times), 3):  # Muestra cada 3 horas
-                f_dt = datetime.fromisoformat(times[i]).replace(tzinfo=timezone.utc)
-                if f_dt > now_utc:
-                    rows_to_insert.append((
-                        f_dt,
-                        city_name,
-                        temps[i],
-                        hums[i],
-                        winds[i],
-                        press[i],
-                        precips[i],
-                        None,
-                        None
-                    ))
-                    
+            for i in range(len(times)):
+                # Convertir timestamp ISO string directamente
+                dt = datetime.fromisoformat(times[i]).replace(tzinfo=timezone.utc)
+                rows_to_insert.append((
+                    dt,
+                    city_name,
+                    temps[i],
+                    hums[i],
+                    winds[i],
+                    press[i],
+                    precips[i]
+                ))
         except Exception as e:
             print(f"Error procesando {city_name}: {e}")
             
@@ -105,12 +61,16 @@ def run_pipeline():
         print("No hay registros para insertar.")
         return
 
-    # Usamos ON CONFLICT / UPDATE o inserción simple
     query = """
         INSERT INTO weather_metrics 
-        (timestamp, city, temperature, humidity, wind_speed, pressure, precipitation, sunrise, sunset)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT DO NOTHING;
+        (timestamp, city, temperature, humidity, wind_speed, pressure, precipitation)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (city, timestamp) DO UPDATE 
+        SET temperature = EXCLUDED.temperature,
+            humidity = EXCLUDED.humidity,
+            wind_speed = EXCLUDED.wind_speed,
+            pressure = EXCLUDED.pressure,
+            precipitation = EXCLUDED.precipitation;
     """
     
     try:
@@ -125,9 +85,9 @@ def run_pipeline():
             cursor.executemany(query, rows_to_insert)
         conn.commit()
         conn.close()
-        print(f"[{datetime.now().isoformat()}] Inserción exitosa de {len(rows_to_insert)} registros.")
+        print(f"[{datetime.now().isoformat()}] Insercion exitosa de {len(rows_to_insert)} registros de pronostico.")
     except Exception as e:
-        print(f"Error de conexión o inserción: {e}")
+        print(f"Error de conexion o insercion: {e}")
 
 if __name__ == "__main__":
     run_pipeline()
